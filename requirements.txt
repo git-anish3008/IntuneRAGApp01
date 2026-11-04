@@ -1,0 +1,12 @@
+customtkinter>=5.2.2
+Pillow>=10.3.0
+llama-cpp-python>=0.2.85
+llama-index-core>=0.10.50
+llama-index-embeddings-fastembed>=0.1.7
+fastembed>=0.3.1
+qdrant-client>=1.9.0
+rank-bm25>=0.2.2
+langgraph>=0.1.5
+pydantic>=2.7.0
+numpy>=1.26.0
+psutil>=5.9.8
