@@ -9,7 +9,7 @@ from core.orchestrator import LangGraphOrchestrator
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
-
+# need to add the graph here for the orchestrator to work properly
 # Theme Colors
 BG_MAIN = "#0F172A"
 BG_SIDEBAR = "#1E293B"
