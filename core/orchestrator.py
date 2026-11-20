@@ -1,8 +1,9 @@
 # ==============================================================================
 # FILE: core/orchestrator.py
-# DESCRIPTION: Pre-Indexed O(1) Intune Win32 & Store Log Analyzer.
+# DESCRIPTION: Pre-Indexed O(1) Intune Win32 & Store Log Analyzer + Runbook RAG.
 #              Filtered for GRS, Toast Notification, and ReevaluationSchedule noise,
-#              with exact operational stopping-step mapping and auto-embedded runbook support.
+#              with exact 18-step runbook mapping, ESP queue detection, follow-up Q&A,
+#              and runbook context grounding for the local LLM.
 # ==============================================================================
 
 import os
@@ -20,7 +21,7 @@ from llama_index.core import Document
 from llama_cpp import Llama, LlamaRAMCache
 from rank_bm25 import BM25Okapi
 
-# 
+# Give exact path to bundled GGUF model files and runbooks (PyInstaller safe).
 def get_resource_path(relative_path: str) -> str:
     """Resolves correct absolute path for bundled GGUF model files and runbooks (PyInstaller safe)."""
     if hasattr(sys, "_MEIPASS"):
@@ -28,7 +29,7 @@ def get_resource_path(relative_path: str) -> str:
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_dir, relative_path)
 
-# Filter out invalid or placeholder GUIDs (e.g., 00000000-0000-0000-0000-000000000000) from log entries.
+# Remove the 0000000000-0000-0000-0000-000000000000 placeholder GUID and any null/empty app IDs.
 def _is_valid_app_id(app_id: str) -> bool:
     """Filters out null/empty GUIDs and placeholder IDs (e.g. 00000000-0000-...-000000000000)."""
     if not app_id:
@@ -36,7 +37,7 @@ def _is_valid_app_id(app_id: str) -> bool:
     clean = app_id.replace("-", "").lower()
     return clean != "00000000000000000000000000000000" and len(clean) == 32
 
-# Remove the JSON-escaped quotes and unicode sequences from raw log payloads to produce clean text for analysis.
+# Unescapes nested JSON string quotes and unicode sequences in raw log payloads.
 def _clean_json_escaped_text(raw_str: str) -> str:
     """Unescapes nested JSON string quotes and unicode sequences in raw log payloads."""
     if not raw_str:
@@ -51,7 +52,7 @@ def _clean_json_escaped_text(raw_str: str) -> str:
     )
     return cleaned.strip()
 
-# Convert decimal error codes (e.g., -2145107934) into standardized 32-bit hex format for consistent error reporting.
+# Convert the decimal error codes (e.g. -2145107934) into standardized 32-bit hex format.
 def decimal_to_hex_error(decimal_str: str) -> str:
     """Converts decimal error codes (e.g. -2145107934) into standardized 32-bit hex format."""
     try:
@@ -62,7 +63,7 @@ def decimal_to_hex_error(decimal_str: str) -> str:
     except Exception:
         return decimal_str
 
-
+# Translate verified hex/decimal Windows error codes into official OS descriptions.
 def format_os_error_code(err_code: str) -> str:
     """Translates verified hex/decimal Windows error codes into official OS descriptions."""
     code_clean = err_code.strip().lower()
@@ -151,6 +152,7 @@ def map_log_to_runbook_step(text: str) -> Tuple[int, str]:
 
     return 1, "Step 1: Start to present application"
 
+# Give precise root cause analyses and act as source of truth for remediation steps based strictly on log evidence.
 
 def build_deterministic_diagnosis_and_fix(dossier: Dict) -> Tuple[str, str]:
     """Generates precise root cause analyses and remediation steps based strictly on log evidence."""
@@ -285,6 +287,7 @@ class IngestionAgent:
             re.IGNORECASE
         )
 
+    # Remove the GRS, Toast Notification, and ReevaluationSchedule noise from the log text to focus on relevant errors.
     def _is_irrelevant_grs_or_daemon_noise(self, text: str) -> bool:
         low = text.lower()
         noise_markers = [
@@ -1054,9 +1057,36 @@ class KnowledgeAgent:
             corpus = [re.sub(r'[^a-z0-9]', ' ', p.lower()).split() for p in self.paragraphs]
             self.bm25 = BM25Okapi(corpus)
 
+    def search_runbook(self, query_text: str, top_k: int = 2, max_chars: int = 700) -> str:
+        """Retrieves matching runbook paragraphs using BM25 keyword overlap."""
+        if not self.bm25 or not self.paragraphs:
+            return "No matching runbook guidance found."
+
+        tokens = re.sub(r'[^a-z0-9]', ' ', query_text.lower()).split()
+        if not tokens:
+            return "No matching runbook guidance found."
+
+        scores = self.bm25.get_scores(tokens)
+        ranked_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+
+        matches = []
+        total_len = 0
+        for idx in ranked_indices[:top_k]:
+            if scores[idx] <= 0:
+                continue
+            para = self.paragraphs[idx]
+            if total_len + len(para) > max_chars:
+                para = para[: max(0, max_chars - total_len)] + "..."
+            matches.append(para)
+            total_len += len(para)
+            if total_len >= max_chars:
+                break
+
+        return "\n---\n".join(matches) if matches else "No matching runbook guidance found."
+
 
 # ==============================================================================
-# ORCHESTRATOR: INSTANT O(1) DOSSIER + GROUNDED STREAMING ENGINE
+# ORCHESTRATOR: INSTANT O(1) DOSSIER + RUNBOOK-GROUNDED STREAMING ENGINE
 # ==============================================================================
 class LangGraphOrchestrator:
     def __init__(self, log_paths: List[str], runbook_paths: Optional[List[str]] = None):
@@ -1104,7 +1134,7 @@ class LangGraphOrchestrator:
         self.llm = Llama(
             model_path=model_path,
             n_gpu_layers=-1,
-            n_ctx=1024,
+            n_ctx=2048,
             n_threads=optimal_threads,
             n_threads_batch=optimal_threads,
             n_batch=512,
@@ -1118,17 +1148,17 @@ class LangGraphOrchestrator:
 
         self.static_system_prompt = (
             "You are a Senior Microsoft Intune Escalation Engineer. "
-            "Summarize the Verified Status/Root Cause below in 2 clear, direct sentences starting with '• Analysis Summary:'. "
-            "Never invent errors if the Verified Status states the app is Installed or has No Failure."
+            "Use the Verified Status, Stopping Step, Key Log Line, and Matched Runbook Guidance to write "
+            "2-3 clear, direct sentences starting with '• Analysis Summary:'. "
+            "Never invent errors or contradict the Verified Status."
         )
 
     def prepare_turn(self, query: str) -> Dict:
         t_prep_start = time.perf_counter()
         q_lower = query.lower()
 
-        # 1. Full App Inventory Request (Expanded to catch variations)
         list_keywords = [
-            "all application", "all app", "list app", "list all", "fetch all", 
+            "all application", "all app", "list app", "list all", "fetch all",
             "show all", "get all", "which apps", "mentioned in the log", "inventory"
         ]
 
@@ -1194,10 +1224,58 @@ class LangGraphOrchestrator:
             self.last_turn_payload = missing_payload
             return missing_payload
 
-        if _is_valid_app_id(hit.get("app_id")):
-            self.last_target_app_id = hit["app_id"]
-
         failing_line_preview = hit.get("key_error_line", "N/A")
+        runbook_query = f"{hit['stopping_step']} {hit['error_code']} {failing_line_preview}"
+        runbook_context = self.knowledge.search_runbook(runbook_query, top_k=2, max_chars=700)
+
+        initial_scan_keywords = [
+            "any app", "any application", "which app", "what app",
+            "failed app", "failing app", "got failed", "other app", "status of"
+        ]
+        is_followup = (
+            self.last_target_app_id is not None
+            and hit["app_id"] == self.last_target_app_id
+            and not explicit_query_guid
+            and not any(kw in q_lower for kw in initial_scan_keywords)
+        )
+
+        self.last_target_app_id = hit["app_id"]
+
+        if hit.get("is_already_installed"):
+            status_tag = "Status: Installed"
+        elif hit.get("is_esp_queued_pending"):
+            status_tag = "Status: Queued in ESP (Pending Execution)"
+        elif not hit.get("has_real_failure"):
+            status_tag = "Status: Not Installed (No Error)"
+        else:
+            status_tag = f"Error: {hit['error_code']}"
+
+        if is_followup:
+            prep_ms = (time.perf_counter() - t_prep_start) * 1000.0
+            followup_payload = {
+                "mode": "stream",
+                "is_followup": True,
+                "instant_header": f"Follow-up on {hit['app_name']} ({hit['app_id']}):\n",
+                "verified_fix_footer": "",
+                "evidence": hit["evidence"],
+                "verified_root_cause": hit["verified_root_cause"],
+                "verified_actionable_fix": hit["verified_actionable_fix"],
+                "runbook_context": runbook_context,
+                "install_context": hit["install_context"],
+                "command_line": hit["command_line"],
+                "detection_rule_summary": hit["detection_rule_summary"],
+                "stopping_step": hit["stopping_step"],
+                "key_error_line": failing_line_preview[:300],
+                "app_id": hit["app_id"],
+                "app_name": hit["app_name"],
+                "error_code": hit["error_code"],
+                "status_tag": status_tag,
+                "phase_tag": "Follow-up Q&A",
+                "query": query,
+                "prep_ms": round(prep_ms, 2)
+            }
+            self.last_turn_payload = followup_payload
+            return followup_payload
 
         instant_header = (
             f"Target App ID: {hit['app_id']}  |  App Name: {hit['app_name']}  |  Logs Collected: {hit['total_records']} record(s)\n"
@@ -1215,23 +1293,17 @@ class LangGraphOrchestrator:
             f"{hit['verified_actionable_fix']}"
         )
 
-        if hit.get("is_already_installed"):
-            status_tag = "Status: Installed"
-        elif hit.get("is_esp_queued_pending"):
-            status_tag = "Status: Queued in ESP (Pending Execution)"
-        elif not hit.get("has_real_failure"):
-            status_tag = "Status: Not Installed (No Error)"
-        else:
-            status_tag = f"Error: {hit['error_code']}"
-
         prep_ms = (time.perf_counter() - t_prep_start) * 1000.0
 
         result_payload = {
             "mode": "stream",
+            "is_followup": False,
             "instant_header": instant_header,
             "verified_fix_footer": verified_fix_footer,
             "evidence": hit["evidence"],
             "verified_root_cause": hit["verified_root_cause"],
+            "runbook_context": runbook_context,
+            "key_error_line": failing_line_preview[:300],
             "stopping_step": hit["stopping_step"],
             "app_id": hit["app_id"],
             "app_name": hit["app_name"],
@@ -1251,23 +1323,54 @@ class LangGraphOrchestrator:
         token_count = 0
         full_output = [prepared.get("instant_header", "")]
 
-        messages = [
-            {"role": "system", "content": self.static_system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"Verified Status/Root Cause: {prepared['verified_root_cause']}\n"
-                    f"Write the '• Analysis Summary:' now:"
-                )
-            }
-        ]
+        if prepared.get("is_followup"):
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a Senior Microsoft Intune Escalation Engineer answering a follow-up question "
+                        "about an analyzed app. Answer directly in 2-3 clear sentences using ONLY the verified facts and runbook guidance below. "
+                        "Do not repeat the full report header."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"App: {prepared['app_name']} ({prepared['app_id']})\n"
+                        f"Error / Status: {prepared['error_code']} at {prepared['stopping_step']}\n"
+                        f"Install Context: {prepared['install_context']} | Command: {prepared['command_line']}\n"
+                        f"Detection Rule: {prepared['detection_rule_summary']}\n"
+                        f"Verified Root Cause: {prepared['verified_root_cause']}\n"
+                        f"Verified Remediation: {prepared['verified_actionable_fix']}\n"
+                        f"Matched Runbook Guidance:\n{prepared.get('runbook_context', 'None')}\n\n"
+                        f"Engineer's Follow-up Question: {prepared['query']}\n"
+                        f"Answer:"
+                    )
+                }
+            ]
+            max_toks = 140
+        else:
+            messages = [
+                {"role": "system", "content": self.static_system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Verified Status: {prepared['verified_root_cause']}\n"
+                        f"Stopping Step: {prepared['stopping_step']}\n"
+                        f"Key Log Line: {prepared.get('key_error_line', 'N/A')}\n"
+                        f"Matched Runbook Guidance:\n{prepared.get('runbook_context', 'None')}\n\n"
+                        f"Write the '• Analysis Summary:' now:"
+                    )
+                }
+            ]
+            max_toks = 95
 
         stream = self.llm.create_chat_completion(
             messages=messages,
             temperature=0.0,
             top_p=0.9,
             repeat_penalty=1.15,
-            max_tokens=85,
+            max_tokens=max_toks,
             stream=True
         )
 
@@ -1281,8 +1384,10 @@ class LangGraphOrchestrator:
                 full_output.append(token)
                 yield token
 
-        full_output.append(prepared["verified_fix_footer"])
-        yield prepared["verified_fix_footer"]
+        footer = prepared.get("verified_fix_footer", "")
+        if footer:
+            full_output.append(footer)
+            yield footer
 
         total_llm_ms = (time.perf_counter() - t_llm_start) * 1000.0
         if self.last_turn_payload:
