@@ -82,3 +82,7 @@ Building a reliable diagnostic engine on a 3B model required three major archite
 │  • Supports multi-turn follow-up Q&A on active App GUID     │
 │  • Logs ingest/index/TTFT metrics to telemetry/perf.jsonl   │
 └─────────────────────────────────────────────────────────────┘
+
+## Application Demo
+
+[▶ Watch Application Demo](./demo.mp4)
