@@ -85,4 +85,4 @@ Building a reliable diagnostic engine on a 3B model required three major archite
 
 ## Application Demo
 
-https://github.com/git-anish3008/IntuneRAGApp01/blob/main/Demo2.mp4
+[https://github.com/git-anish3008/IntuneRAGApp01/blob/main/Demo2.mp4](https://github.com/git-anish3008/IntuneRAGApp01/blob/4f481a1eb009967ce589f684db3dfc58a10aa710/Demo2.mp4)
