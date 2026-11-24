@@ -85,4 +85,4 @@ Building a reliable diagnostic engine on a 3B model required three major archite
 
 ## Application Demo
 
-[[▶ Watch SOUP - Intune Win32 Troubleshooter Demo](./Demo2.mp4)](https://github.com/git-anish3008/IntuneRAGApp01/blob/main/Demo2.mp4)
+https://github.com/git-anish3008/IntuneRAGApp01/blob/main/Demo2.mp4
